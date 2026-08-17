@@ -12,14 +12,14 @@ import com.shivam.tradingbot.domain.fno.IndexUnderlying
 import com.shivam.tradingbot.domain.fno.OptionContract
 import com.shivam.tradingbot.domain.fno.OptionOrderIntent
 import com.shivam.tradingbot.domain.fno.OptionType
-import com.shivam.tradingbot.domain.model.Candle
 import com.shivam.tradingbot.domain.model.OrderSide
+import com.shivam.tradingbot.domain.strategy.EmaRsiIntradayStrategy
+import com.shivam.tradingbot.domain.strategy.IntradayDirection
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.scheduling.annotation.Scheduled
 import org.springframework.stereotype.Component
 import java.math.BigDecimal
-import java.math.RoundingMode
 import java.time.Clock
 import java.time.DayOfWeek
 import java.time.LocalDate
@@ -30,8 +30,8 @@ import java.time.ZoneId
  * An opt-in, paper-only automation loop. It never invokes Kite's order API.
  *
  * FIXED mode trades a contract supplied in .env. DYNAMIC_NIFTY_TREND chooses a
- * next-expiry ATM NIFTY CE or PE from the underlying's completed daily candles:
- * 5-day MA above 20-day MA selects CE; below selects PE; equal means no trade.
+ * next-expiry ATM NIFTY CE or PE from completed 5-minute NIFTY candles using
+ * an EMA(9)/EMA(21) crossover with an RSI(14) filter.
  * This is a learning rule, not a prediction or an investment recommendation.
  */
 @Component
@@ -41,6 +41,7 @@ class FnoPaperAutomationService(
     private val historicalData: KiteHistoricalDataPort,
     private val optionContracts: KiteOptionContractLookupPort,
     private val fillStore: OptionPaperFillStorePort,
+    private val intradayStrategy: EmaRsiIntradayStrategy,
     private val placeOptionPaperOrder: PlaceOptionPaperOrderUseCase,
     private val closeOptionPaperPosition: CloseOptionPaperPositionUseCase,
     @Value("\${FNO_PAPER_AUTOMATION_ENABLED:false}") private val enabled: Boolean,
@@ -170,26 +171,24 @@ class FnoPaperAutomationService(
                 KiteHistoricalDataRequest(
                     symbol = "NSE:NIFTY 50",
                     instrumentToken = underlyingQuote.instrumentToken,
-                    interval = KiteCandleInterval.DAY,
-                    from = clock.instant().minusSeconds(90L * 24 * 60 * 60),
+                    interval = KiteCandleInterval.FIVE_MINUTE,
+                    from = clock.instant().minusSeconds(5L * 24 * 60 * 60),
                     to = clock.instant(),
                 ),
             )
         }.getOrElse { error ->
-            log.warn("Cannot choose a NIFTY paper contract: daily candles unavailable ({})", error.message)
+            log.warn("Cannot choose a NIFTY paper contract: 5-minute candles unavailable ({})", error.message)
             return null
         }
-        if (candles.size < 20) {
-            log.warn("Cannot choose a NIFTY paper contract: only {} daily candles available", candles.size)
-            return null
-        }
-        val shortAverage = averageClose(candles.takeLast(5))
-        val longAverage = averageClose(candles.takeLast(20))
-        val type = when {
-            shortAverage > longAverage -> OptionType.CE
-            shortAverage < longAverage -> OptionType.PE
-            else -> {
-                log.info("NIFTY trend is neutral (5-day MA={} and 20-day MA={}); no paper trade", shortAverage, longAverage)
+        val completedCandles = candles
+            .filter { it.closedAt <= clock.instant().minusSeconds(fiveMinutesInSeconds) }
+            .sortedBy { it.closedAt }
+        val decision = intradayStrategy.evaluate(completedCandles)
+        val type = when (decision.direction) {
+            IntradayDirection.BULLISH -> OptionType.CE
+            IntradayDirection.BEARISH -> OptionType.PE
+            IntradayDirection.NEUTRAL -> {
+                log.info("NIFTY intraday signal is neutral; {}", decision.reason)
                 return null
             }
         }
@@ -205,11 +204,8 @@ class FnoPaperAutomationService(
                 return null
             }
         val contract = optionContracts.find(OptionContractQuery(IndexUnderlying.NIFTY, expiry, strike, type)).contract
-        return Candidate(contract, null, "NIFTY 5-day MA=$shortAverage, 20-day MA=$longAverage; selected ATM $type at strike $strike")
+        return Candidate(contract, null, "${decision.reason}; selected ATM $type at strike $strike")
     }
-
-    private fun averageClose(candles: List<Candle>): BigDecimal = candles.map { it.close }.reduce(BigDecimal::add)
-        .divide(BigDecimal(candles.size), 4, RoundingMode.HALF_UP)
 
     private fun isTradingDay(): Boolean {
         val now = istNow()
@@ -226,5 +222,6 @@ class FnoPaperAutomationService(
         val lastEntryTime: LocalTime = LocalTime.of(15, 0)
         val forcedExitTime: LocalTime = LocalTime.of(15, 25)
         val marketClose: LocalTime = LocalTime.of(15, 30)
+        const val fiveMinutesInSeconds: Long = 300
     }
 }

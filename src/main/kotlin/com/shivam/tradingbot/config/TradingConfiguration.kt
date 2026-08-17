@@ -22,6 +22,7 @@ import com.shivam.tradingbot.application.usecase.GetKiteQuoteUseCase
 import com.shivam.tradingbot.domain.risk.FixedLimitRiskManager
 import com.shivam.tradingbot.domain.risk.RiskManager
 import com.shivam.tradingbot.domain.strategy.MovingAverageCrossoverStrategy
+import com.shivam.tradingbot.domain.strategy.EmaRsiIntradayStrategy
 import com.shivam.tradingbot.domain.strategy.TradingStrategy
 import com.shivam.tradingbot.domain.cost.NseEquityDeliveryCostCalculator
 import com.shivam.tradingbot.domain.cost.FixedBpsSlippage
@@ -42,6 +43,9 @@ class TradingConfiguration {
 
     @Bean
     fun strategy(): TradingStrategy = MovingAverageCrossoverStrategy(shortWindow = 3, longWindow = 10)
+
+    @Bean
+    fun emaRsiIntradayStrategy() = EmaRsiIntradayStrategy()
 
     @Bean
     fun riskManager(): RiskManager = FixedLimitRiskManager(
