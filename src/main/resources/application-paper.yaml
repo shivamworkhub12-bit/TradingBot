@@ -1,0 +1,9 @@
+spring:
+  config:
+    activate:
+      on-profile: paper
+  autoconfigure:
+    # The learning application starts without a database unless postgres is
+    # explicitly selected.
+    exclude:
+      - org.springframework.boot.jdbc.autoconfigure.DataSourceAutoConfiguration

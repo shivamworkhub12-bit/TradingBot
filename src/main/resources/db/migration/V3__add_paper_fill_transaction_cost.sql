@@ -1,0 +1,2 @@
+ALTER TABLE paper_fills
+ADD COLUMN transaction_cost NUMERIC(19, 4) NOT NULL DEFAULT 0;

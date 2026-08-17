@@ -1,0 +1,11 @@
+spring:
+  config:
+    import: optional:file:.env[.properties]
+  application:
+    name: TradingBot
+  datasource:
+    url: ${DATABASE_URL:jdbc:postgresql://localhost:5432/tradingbot}
+    username: ${DATABASE_USERNAME:tradingbot}
+    password: ${DATABASE_PASSWORD:tradingbot_dev_password}
+  flyway:
+    enabled: true
