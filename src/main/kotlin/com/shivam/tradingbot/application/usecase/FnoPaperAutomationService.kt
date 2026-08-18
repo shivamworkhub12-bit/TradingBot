@@ -8,6 +8,7 @@ import com.shivam.tradingbot.application.port.out.KiteQuoteLookupPort
 import com.shivam.tradingbot.application.port.out.OptionContractQuery
 import com.shivam.tradingbot.application.port.out.OptionPaperFillStorePort
 import com.shivam.tradingbot.application.port.out.OptionPaperPortfolioStorePort
+import com.shivam.tradingbot.application.port.out.StrategyDecisionStorePort
 import com.shivam.tradingbot.domain.fno.IndexUnderlying
 import com.shivam.tradingbot.domain.fno.OptionContract
 import com.shivam.tradingbot.domain.fno.OptionOrderIntent
@@ -15,6 +16,8 @@ import com.shivam.tradingbot.domain.fno.OptionType
 import com.shivam.tradingbot.domain.model.OrderSide
 import com.shivam.tradingbot.domain.strategy.EmaRsiIntradayStrategy
 import com.shivam.tradingbot.domain.strategy.IntradayDirection
+import com.shivam.tradingbot.domain.strategy.StrategyDecisionRecord
+import com.shivam.tradingbot.domain.strategy.StrategyExecutionStatus
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.scheduling.annotation.Scheduled
@@ -41,6 +44,7 @@ class FnoPaperAutomationService(
     private val historicalData: KiteHistoricalDataPort,
     private val optionContracts: KiteOptionContractLookupPort,
     private val fillStore: OptionPaperFillStorePort,
+    private val decisionJournal: StrategyDecisionStorePort,
     private val intradayStrategy: EmaRsiIntradayStrategy,
     private val placeOptionPaperOrder: PlaceOptionPaperOrderUseCase,
     private val closeOptionPaperPosition: CloseOptionPaperPositionUseCase,
@@ -83,7 +87,7 @@ class FnoPaperAutomationService(
         }
 
         // New entries stop well before the mandatory paper exit at 3:25 PM IST.
-        if (time !in marketOpen..lastEntryTime) return
+        if (time !in firstEntryTime..lastEntryTime) return
         if (tradedOn == today || fillStore.hasFillOn(today)) {
             log.info("F&O paper automation will not open another position today")
             return
@@ -98,10 +102,28 @@ class FnoPaperAutomationService(
         } ?: return
 
         val quote = runCatching { quoteLookup.latest("NFO:${candidate.contract.tradingSymbol}") }.getOrElse { error ->
+            candidate.decisionRecord?.let { decision ->
+                decisionJournal.save(
+                    decision.copy(
+                        evaluatedAt = clock.instant(),
+                        executionStatus = StrategyExecutionStatus.MARKET_DATA_ERROR,
+                        reason = "${decision.reason}; option quote unavailable: ${error.message}",
+                    ),
+                )
+            }
             log.warn("F&O paper automation skipped: unable to get a quote for {} ({})", candidate.contract.tradingSymbol, error.message)
             return
         }
         if (quote.lastPrice > maximumOptionPremium) {
+            candidate.decisionRecord?.let { decision ->
+                decisionJournal.save(
+                    decision.copy(
+                        evaluatedAt = clock.instant(),
+                        executionStatus = StrategyExecutionStatus.PREMIUM_REJECTED,
+                        reason = "${decision.reason}; premium ${quote.lastPrice} exceeded cap $maximumOptionPremium",
+                    ),
+                )
+            }
             log.info("F&O paper automation skipped {}: premium {} exceeds configured cap {}", candidate.contract.tradingSymbol, quote.lastPrice, maximumOptionPremium)
             return
         }
@@ -113,8 +135,10 @@ class FnoPaperAutomationService(
         )
         if (result is OptionPaperOrderResult.Filled) {
             tradedOn = today
+            updateDecision(candidate, StrategyExecutionStatus.PAPER_ORDER_FILLED, "paper BUY filled at ${quote.lastPrice}")
             log.info("Created F&O paper BUY for {} at {}; reason={}", candidate.contract.tradingSymbol, quote.lastPrice, candidate.reason)
         } else if (result is OptionPaperOrderResult.Rejected) {
+            updateDecision(candidate, StrategyExecutionStatus.PAPER_ORDER_REJECTED, result.reason)
             log.warn("F&O paper BUY rejected for {}: {}", candidate.contract.tradingSymbol, result.reason)
         }
     }
@@ -154,6 +178,7 @@ class FnoPaperAutomationService(
             OptionContract(underlying, LocalDate.parse(expiry), strike, optionType, lotSize, tradingSymbol),
             entryPremium,
             "fixed contract configured in .env",
+            null,
         )
     }
 
@@ -183,15 +208,45 @@ class FnoPaperAutomationService(
         val completedCandles = candles
             .filter { it.closedAt <= clock.instant().minusSeconds(fiveMinutesInSeconds) }
             .sortedBy { it.closedAt }
+        if (completedCandles.isEmpty()) {
+            log.info("NIFTY intraday strategy has no completed 5-minute candles yet")
+            return null
+        }
+        val latestCandleDate = completedCandles.last().closedAt.atZone(indiaZone).toLocalDate()
+        if (latestCandleDate != today) {
+            log.info("NIFTY intraday strategy is waiting for today's first completed 5-minute candle")
+            return null
+        }
         val decision = intradayStrategy.evaluate(completedCandles)
+        val baseRecord = StrategyDecisionRecord(
+            strategyName = strategyName,
+            symbol = niftySymbol,
+            candleClosedAt = completedCandles.last().closedAt,
+            evaluatedAt = clock.instant(),
+            direction = decision.direction,
+            fastEma = decision.fastEma,
+            slowEma = decision.slowEma,
+            rsi = decision.rsi,
+            underlyingPrice = underlyingQuote.lastPrice,
+            executionStatus = StrategyExecutionStatus.NO_SIGNAL,
+            reason = decision.reason,
+        )
         val type = when (decision.direction) {
             IntradayDirection.BULLISH -> OptionType.CE
             IntradayDirection.BEARISH -> OptionType.PE
             IntradayDirection.NEUTRAL -> {
+                decisionJournal.save(baseRecord)
                 log.info("NIFTY intraday signal is neutral; {}", decision.reason)
                 return null
             }
         }
+        decisionJournal.save(
+            baseRecord.copy(
+                optionType = type,
+                executionStatus = StrategyExecutionStatus.SIGNAL_DETECTED,
+                reason = "${decision.reason}; $type signal detected",
+            ),
+        )
         val expiry = optionContracts.availableExpiries(IndexUnderlying.NIFTY).firstOrNull { it >= today.plusDays(minimumDaysToExpiry) }
             ?: run {
                 log.warn("Cannot choose a NIFTY paper contract: no expiry at least {} days away is available", minimumDaysToExpiry)
@@ -204,7 +259,29 @@ class FnoPaperAutomationService(
                 return null
             }
         val contract = optionContracts.find(OptionContractQuery(IndexUnderlying.NIFTY, expiry, strike, type)).contract
-        return Candidate(contract, null, "${decision.reason}; selected ATM $type at strike $strike")
+        val reason = "${decision.reason}; selected ATM $type at strike $strike"
+        val selectedRecord = baseRecord.copy(
+            optionType = type,
+            expiry = expiry,
+            strike = strike,
+            tradingSymbol = contract.tradingSymbol,
+            executionStatus = StrategyExecutionStatus.SIGNAL_DETECTED,
+            reason = reason,
+        )
+        decisionJournal.save(selectedRecord)
+        return Candidate(contract, null, reason, selectedRecord)
+    }
+
+    private fun updateDecision(candidate: Candidate, status: StrategyExecutionStatus, detail: String) {
+        candidate.decisionRecord?.let { decision ->
+            decisionJournal.save(
+                decision.copy(
+                    evaluatedAt = clock.instant(),
+                    executionStatus = status,
+                    reason = "${decision.reason}; $detail",
+                ),
+            )
+        }
     }
 
     private fun isTradingDay(): Boolean {
@@ -212,16 +289,25 @@ class FnoPaperAutomationService(
         return now.dayOfWeek !in setOf(DayOfWeek.SATURDAY, DayOfWeek.SUNDAY)
     }
 
-    private fun istNow() = clock.instant().atZone(ZoneId.of("Asia/Kolkata"))
+    private fun istNow() = clock.instant().atZone(indiaZone)
 
-    private data class Candidate(val contract: OptionContract, val minimumPremium: BigDecimal?, val reason: String)
+    private data class Candidate(
+        val contract: OptionContract,
+        val minimumPremium: BigDecimal?,
+        val reason: String,
+        val decisionRecord: StrategyDecisionRecord?,
+    )
 
     private companion object {
         val log = LoggerFactory.getLogger(FnoPaperAutomationService::class.java)
+        val indiaZone: ZoneId = ZoneId.of("Asia/Kolkata")
         val marketOpen: LocalTime = LocalTime.of(9, 15)
+        val firstEntryTime: LocalTime = LocalTime.of(9, 20)
         val lastEntryTime: LocalTime = LocalTime.of(15, 0)
         val forcedExitTime: LocalTime = LocalTime.of(15, 25)
         val marketClose: LocalTime = LocalTime.of(15, 30)
         const val fiveMinutesInSeconds: Long = 300
+        const val strategyName: String = "EMA_9_21_RSI_14"
+        const val niftySymbol: String = "NSE:NIFTY 50"
     }
 }

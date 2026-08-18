@@ -8,6 +8,7 @@ import com.shivam.tradingbot.application.port.out.SignalStorePort
 import com.shivam.tradingbot.domain.model.PaperPortfolio
 import com.shivam.tradingbot.adapter.out.persistence.InMemoryOptionPaperFillStore
 import com.shivam.tradingbot.adapter.out.persistence.InMemoryOptionPaperPortfolioStore
+import com.shivam.tradingbot.adapter.out.persistence.InMemoryStrategyDecisionJournal
 import com.shivam.tradingbot.domain.fno.OptionPaperPortfolio
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
@@ -34,4 +35,7 @@ class PaperModeConfiguration {
 
     @Bean
     fun optionPaperFillStore() = InMemoryOptionPaperFillStore()
+
+    @Bean
+    fun strategyDecisionJournal() = InMemoryStrategyDecisionJournal()
 }

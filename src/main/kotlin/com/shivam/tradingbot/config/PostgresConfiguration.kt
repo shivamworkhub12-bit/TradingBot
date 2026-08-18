@@ -6,6 +6,7 @@ import com.shivam.tradingbot.adapter.out.persistence.JdbcPaperPortfolioStoreAdap
 import com.shivam.tradingbot.adapter.out.persistence.JdbcSignalStoreAdapter
 import com.shivam.tradingbot.adapter.out.persistence.JdbcOptionPaperFillStore
 import com.shivam.tradingbot.adapter.out.persistence.JdbcOptionPaperPortfolioStore
+import com.shivam.tradingbot.adapter.out.persistence.JdbcStrategyDecisionJournal
 import org.flywaydb.core.Flyway
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.context.annotation.Bean
@@ -62,4 +63,7 @@ class PostgresConfiguration {
 
     @Bean
     fun optionPaperFillStore(jdbcTemplate: JdbcTemplate) = JdbcOptionPaperFillStore(jdbcTemplate)
+
+    @Bean
+    fun strategyDecisionJournal(jdbcTemplate: JdbcTemplate) = JdbcStrategyDecisionJournal(jdbcTemplate)
 }
