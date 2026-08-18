@@ -5,6 +5,7 @@ import java.math.BigDecimal
 import java.time.Instant
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 
 class EmaRsiIntradayStrategyTest {
     @Test
@@ -40,8 +41,28 @@ class EmaRsiIntradayStrategyTest {
         assertEquals(BigDecimal("100"), decision.rsi)
     }
 
-    private fun candles(closes: List<Int>): List<Candle> = closes.mapIndexed { index, close ->
-        val price = BigDecimal(close)
+    @Test
+    fun `rejects a crossover whose EMA separation is too weak`() {
+        val strategy = EmaRsiIntradayStrategy(bullishRsiRange = BigDecimal.ZERO..BigDecimal("100"))
+
+        val decision = strategy.evaluate(decimalCandles(List(23) { BigDecimal("100") } + BigDecimal("100.001")))
+
+        assertEquals(IntradayDirection.NEUTRAL, decision.direction)
+        assertTrue(decision.reason.contains("separation="))
+    }
+
+    @Test
+    fun `confirms a strong crossover on the following candle`() {
+        val strategy = EmaRsiIntradayStrategy(bullishRsiRange = BigDecimal.ZERO..BigDecimal("100"))
+
+        val decision = strategy.evaluate(candles(List(23) { 100 } + listOf(110, 112)))
+
+        assertEquals(IntradayDirection.BULLISH, decision.direction)
+    }
+
+    private fun candles(closes: List<Int>): List<Candle> = closes.map { BigDecimal(it) }.let(::decimalCandles)
+
+    private fun decimalCandles(closes: List<BigDecimal>): List<Candle> = closes.mapIndexed { index, price ->
         Candle(
             symbol = "NSE:NIFTY 50",
             closedAt = Instant.parse("2026-08-17T03:45:00Z").plusSeconds(index * 300L),

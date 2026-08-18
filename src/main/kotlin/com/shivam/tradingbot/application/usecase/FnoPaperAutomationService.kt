@@ -62,9 +62,13 @@ class FnoPaperAutomationService(
     @Value("\${FNO_PAPER_AUTOMATION_MIN_DAYS_TO_EXPIRY:7}") private val minimumDaysToExpiry: Long,
     @Value("\${FNO_PAPER_AUTOMATION_STOP_LOSS_PERCENT:25}") private val stopLossPercent: BigDecimal,
     @Value("\${FNO_PAPER_AUTOMATION_TARGET_PERCENT:25}") private val targetPercent: BigDecimal,
+    @Value("\${FNO_PAPER_AUTOMATION_LAST_ENTRY_TIME:14:30}") private val lastEntryTimeText: String,
     private val clock: Clock = Clock.systemUTC(),
 ) {
     private var tradedOn: LocalDate? = null
+    private val lastEntryTime = LocalTime.parse(lastEntryTimeText).also {
+        require(it < forcedExitTime) { "FNO paper automation last entry time must be before the forced exit time" }
+    }
 
     @Scheduled(fixedDelayString = "\${FNO_PAPER_AUTOMATION_POLL_DELAY_MS:60000}")
     fun poll() {
@@ -87,7 +91,7 @@ class FnoPaperAutomationService(
         }
 
         // New entries stop well before the mandatory paper exit at 3:25 PM IST.
-        if (time !in firstEntryTime..lastEntryTime) return
+        if (time < firstEntryTime || time >= lastEntryTime) return
         if (tradedOn == today || fillStore.hasFillOn(today)) {
             log.info("F&O paper automation will not open another position today")
             return
@@ -303,7 +307,6 @@ class FnoPaperAutomationService(
         val indiaZone: ZoneId = ZoneId.of("Asia/Kolkata")
         val marketOpen: LocalTime = LocalTime.of(9, 15)
         val firstEntryTime: LocalTime = LocalTime.of(9, 20)
-        val lastEntryTime: LocalTime = LocalTime.of(15, 0)
         val forcedExitTime: LocalTime = LocalTime.of(15, 25)
         val marketClose: LocalTime = LocalTime.of(15, 30)
         const val fiveMinutesInSeconds: Long = 300

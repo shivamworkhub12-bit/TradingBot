@@ -25,11 +25,17 @@ class EmaRsiIntradayStrategy(
     private val rsiPeriod: Int = 14,
     private val bullishRsiRange: ClosedRange<BigDecimal> = BigDecimal("40")..BigDecimal("70"),
     private val bearishRsiRange: ClosedRange<BigDecimal> = BigDecimal("30")..BigDecimal("60"),
+    private val confirmationCandles: Int = 3,
+    private val minimumEmaSeparationBasisPoints: BigDecimal = BigDecimal.ONE,
 ) {
     init {
         require(fastPeriod > 0) { "fastPeriod must be positive" }
         require(slowPeriod > fastPeriod) { "slowPeriod must be greater than fastPeriod" }
         require(rsiPeriod > 0) { "rsiPeriod must be positive" }
+        require(confirmationCandles > 0) { "confirmationCandles must be positive" }
+        require(minimumEmaSeparationBasisPoints >= BigDecimal.ZERO) {
+            "minimumEmaSeparationBasisPoints must not be negative"
+        }
     }
 
     fun evaluate(candles: List<Candle>): IntradayStrategyDecision {
@@ -43,19 +49,34 @@ class EmaRsiIntradayStrategy(
         val fast = ema(closes, fastPeriod)
         val slow = ema(closes, slowPeriod)
         val currentRsi = rsi(closes.takeLast(rsiPeriod + 1))
-        val previousFast = fast[fast.lastIndex - 1]
         val currentFast = fast.last()
-        val previousSlow = slow[slow.lastIndex - 1]
         val currentSlow = slow.last()
+        val recentTransitions = (fast.lastIndex - confirmationCandles + 1).coerceAtLeast(1)..fast.lastIndex
+        val bullishCrossedRecently = recentTransitions.any { index ->
+            fast[index - 1] <= slow[index - 1] && fast[index] > slow[index]
+        }
+        val bearishCrossedRecently = recentTransitions.any { index ->
+            fast[index - 1] >= slow[index - 1] && fast[index] < slow[index]
+        }
+        val separationBasisPoints = currentFast.subtract(currentSlow).abs()
+            .divide(closes.last(), mathContext)
+            .multiply(basisPoints, mathContext)
 
         val direction = when {
-            previousFast <= previousSlow && currentFast > currentSlow && currentRsi in bullishRsiRange ->
+            bullishCrossedRecently &&
+                currentFast > currentSlow &&
+                separationBasisPoints >= minimumEmaSeparationBasisPoints &&
+                currentRsi in bullishRsiRange ->
                 IntradayDirection.BULLISH
-            previousFast >= previousSlow && currentFast < currentSlow && currentRsi in bearishRsiRange ->
+            bearishCrossedRecently &&
+                currentFast < currentSlow &&
+                separationBasisPoints >= minimumEmaSeparationBasisPoints &&
+                currentRsi in bearishRsiRange ->
                 IntradayDirection.BEARISH
             else -> IntradayDirection.NEUTRAL
         }
-        val reason = "EMA($fastPeriod)=${currentFast.display()}, EMA($slowPeriod)=${currentSlow.display()}, RSI($rsiPeriod)=${currentRsi.display()}"
+        val reason = "EMA($fastPeriod)=${currentFast.display()}, EMA($slowPeriod)=${currentSlow.display()}, " +
+            "separation=${separationBasisPoints.display(4)} bps, RSI($rsiPeriod)=${currentRsi.display()}"
         return IntradayStrategyDecision(direction, currentFast, currentSlow, currentRsi, reason)
     }
 
@@ -86,9 +107,10 @@ class EmaRsiIntradayStrategy(
         reason,
     )
 
-    private fun BigDecimal.display(): BigDecimal = setScale(2, RoundingMode.HALF_UP)
+    private fun BigDecimal.display(scale: Int = 2): BigDecimal = setScale(scale, RoundingMode.HALF_UP)
 
     private companion object {
         val mathContext = MathContext(12, RoundingMode.HALF_UP)
+        val basisPoints = BigDecimal("10000")
     }
 }
