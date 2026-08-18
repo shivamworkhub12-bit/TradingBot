@@ -19,8 +19,12 @@ class StrategyDecisionController(
     private val history: StrategyDecisionHistoryPort,
 ) {
     @GetMapping
-    fun latest(@RequestParam(defaultValue = "20") limit: Int): List<StrategyDecisionResponse> =
-        history.latest(validatedLimit(limit)).map(StrategyDecisionResponse::from)
+    fun latest(
+        @RequestParam(defaultValue = "20") limit: Int,
+        @RequestParam(required = false) symbol: String?,
+    ): List<StrategyDecisionResponse> = history
+        .latest(validatedLimit(limit), symbol?.trim()?.takeIf(String::isNotEmpty))
+        .map(StrategyDecisionResponse::from)
 }
 
 data class StrategyDecisionResponse(

@@ -6,6 +6,6 @@ fun interface StrategyDecisionStorePort {
     fun save(decision: StrategyDecisionRecord)
 }
 
-fun interface StrategyDecisionHistoryPort {
-    fun latest(limit: Int): List<StrategyDecisionRecord>
+interface StrategyDecisionHistoryPort {
+    fun latest(limit: Int, symbol: String? = null): List<StrategyDecisionRecord>
 }

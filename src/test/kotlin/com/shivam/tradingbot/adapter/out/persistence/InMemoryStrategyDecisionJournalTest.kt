@@ -34,6 +34,18 @@ class InMemoryStrategyDecisionJournalTest {
         assertEquals(newer.candleClosedAt, journal.latest(1).single().candleClosedAt)
     }
 
+    @Test
+    fun `filters decisions by index symbol`() {
+        val journal = InMemoryStrategyDecisionJournal()
+        val nifty = decision(StrategyExecutionStatus.NO_SIGNAL)
+        val bankNifty = nifty.copy(symbol = "NSE:NIFTY BANK")
+
+        journal.save(nifty)
+        journal.save(bankNifty)
+
+        assertEquals(listOf(bankNifty), journal.latest(20, "NSE:NIFTY BANK"))
+    }
+
     private fun decision(status: StrategyExecutionStatus) = StrategyDecisionRecord(
         strategyName = "EMA_9_21_RSI_14",
         symbol = "NSE:NIFTY 50",

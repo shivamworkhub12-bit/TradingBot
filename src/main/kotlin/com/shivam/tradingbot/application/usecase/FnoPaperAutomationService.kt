@@ -32,9 +32,10 @@ import java.time.ZoneId
 /**
  * An opt-in, paper-only automation loop. It never invokes Kite's order API.
  *
- * FIXED mode trades a contract supplied in .env. DYNAMIC_NIFTY_TREND chooses a
- * next-expiry ATM NIFTY CE or PE from completed 5-minute NIFTY candles using
- * an EMA(9)/EMA(21) crossover with an RSI(14) filter.
+ * FIXED mode trades a contract supplied in .env. Dynamic modes choose a
+ * next-expiry ATM CE or PE from completed 5-minute index candles using an
+ * EMA(9)/EMA(21) crossover with an RSI(14) filter. DYNAMIC_INDEX_TREND can
+ * evaluate NIFTY and BANKNIFTY independently in the same paper session.
  * This is a learning rule, not a prediction or an investment recommendation.
  */
 @Component
@@ -58,17 +59,28 @@ class FnoPaperAutomationService(
     @Value("\${FNO_PAPER_AUTOMATION_LOT_SIZE:0}") private val lotSize: Int,
     @Value("\${FNO_PAPER_AUTOMATION_LOTS:1}") private val lots: Int,
     @Value("\${FNO_PAPER_AUTOMATION_ENTRY_PREMIUM:0}") private val entryPremium: BigDecimal,
-    @Value("\${FNO_PAPER_AUTOMATION_MAX_OPTION_PREMIUM:250}") private val maximumOptionPremium: BigDecimal,
+    @Value("\${FNO_PAPER_AUTOMATION_MAX_OPTION_PREMIUM:250}") private val defaultMaximumOptionPremium: BigDecimal,
     @Value("\${FNO_PAPER_AUTOMATION_MIN_DAYS_TO_EXPIRY:7}") private val minimumDaysToExpiry: Long,
-    @Value("\${FNO_PAPER_AUTOMATION_STOP_LOSS_PERCENT:25}") private val stopLossPercent: BigDecimal,
-    @Value("\${FNO_PAPER_AUTOMATION_TARGET_PERCENT:25}") private val targetPercent: BigDecimal,
     @Value("\${FNO_PAPER_AUTOMATION_LAST_ENTRY_TIME:14:30}") private val lastEntryTimeText: String,
+    @Value("\${FNO_PAPER_AUTOMATION_DYNAMIC_UNDERLYINGS:NIFTY,BANKNIFTY}") private val dynamicUnderlyingText: String,
+    @Value("\${FNO_PAPER_AUTOMATION_NIFTY_MAX_OPTION_PREMIUM:\${FNO_PAPER_AUTOMATION_MAX_OPTION_PREMIUM:250}}") private val niftyMaximumOptionPremium: BigDecimal,
+    @Value("\${FNO_PAPER_AUTOMATION_BANKNIFTY_MAX_OPTION_PREMIUM:\${FNO_PAPER_AUTOMATION_MAX_OPTION_PREMIUM:250}}") private val bankNiftyMaximumOptionPremium: BigDecimal,
+    @Value("\${FNO_PAPER_AUTOMATION_NIFTY_STOP_LOSS_PERCENT:\${FNO_PAPER_AUTOMATION_STOP_LOSS_PERCENT:25}}") private val niftyStopLossPercent: BigDecimal,
+    @Value("\${FNO_PAPER_AUTOMATION_BANKNIFTY_STOP_LOSS_PERCENT:\${FNO_PAPER_AUTOMATION_STOP_LOSS_PERCENT:25}}") private val bankNiftyStopLossPercent: BigDecimal,
+    @Value("\${FNO_PAPER_AUTOMATION_NIFTY_TARGET_PERCENT:\${FNO_PAPER_AUTOMATION_TARGET_PERCENT:25}}") private val niftyTargetPercent: BigDecimal,
+    @Value("\${FNO_PAPER_AUTOMATION_BANKNIFTY_TARGET_PERCENT:\${FNO_PAPER_AUTOMATION_TARGET_PERCENT:25}}") private val bankNiftyTargetPercent: BigDecimal,
     private val clock: Clock = Clock.systemUTC(),
 ) {
-    private var tradedOn: LocalDate? = null
+    private val tradedOn = mutableMapOf<IndexUnderlying, LocalDate>()
     private val lastEntryTime = LocalTime.parse(lastEntryTimeText).also {
         require(it < forcedExitTime) { "FNO paper automation last entry time must be before the forced exit time" }
     }
+    private val configuredDynamicUnderlyings = dynamicUnderlyingText.split(',')
+        .map(String::trim)
+        .filter(String::isNotEmpty)
+        .map { IndexUnderlying.valueOf(it.uppercase()) }
+        .distinct()
+        .also { require(it.isNotEmpty()) { "At least one dynamic F&O underlying must be configured" } }
 
     @Scheduled(fixedDelayString = "\${FNO_PAPER_AUTOMATION_POLL_DELAY_MS:60000}")
     fun poll() {
@@ -77,33 +89,58 @@ class FnoPaperAutomationService(
         val today = istNow().toLocalDate()
         val time = istNow().toLocalTime()
         val portfolio = portfolioStore.load()
-        // There is at most one paper position in this learning bot. Always manage it first.
-        portfolio.positions.values.singleOrNull()?.let { position ->
-            if (time in marketOpen..marketClose) {
+        val openUnderlyings = portfolio.positions.values.map { it.contract.underlying }.toSet()
+        if (time in marketOpen..marketClose) {
+            portfolio.positions.values.forEach { position ->
                 manageOpenPosition(
                     tradingSymbol = position.contract.tradingSymbol,
+                    underlying = position.contract.underlying,
                     averagePremium = position.averagePremium,
                     today = today,
                     forceExit = time >= forcedExitTime,
                 )
             }
-            return
         }
 
         // New entries stop well before the mandatory paper exit at 3:25 PM IST.
         if (time < firstEntryTime || time >= lastEntryTime) return
-        if (tradedOn == today || fillStore.hasFillOn(today)) {
-            log.info("F&O paper automation will not open another position today")
-            return
-        }
-        val candidate = when (mode.trim().uppercase()) {
-            "FIXED" -> fixedCandidate()
-            "DYNAMIC_NIFTY_TREND" -> dynamicNiftyCandidate(today)
+        when (mode.trim().uppercase()) {
+            "FIXED" -> attemptEntry(underlying, today, openUnderlyings) { fixedCandidate() }
+            "DYNAMIC_NIFTY_TREND" -> attemptDynamicEntries(listOf(IndexUnderlying.NIFTY), today, openUnderlyings)
+            "DYNAMIC_BANKNIFTY_TREND" -> attemptDynamicEntries(listOf(IndexUnderlying.BANKNIFTY), today, openUnderlyings)
+            "DYNAMIC_INDEX_TREND" -> attemptDynamicEntries(configuredDynamicUnderlyings, today, openUnderlyings)
             else -> {
                 log.warn("F&O paper automation has an unknown mode '{}'; no action taken", mode)
-                null
             }
-        } ?: return
+        }
+    }
+
+    private fun attemptDynamicEntries(
+        underlyings: List<IndexUnderlying>,
+        today: LocalDate,
+        openUnderlyings: Set<IndexUnderlying>,
+    ) {
+        if (lots != 1) {
+            log.warn("Dynamic index automation only permits one lot; configured lots={} so no action taken", lots)
+            return
+        }
+        underlyings.forEach { index ->
+            attemptEntry(index, today, openUnderlyings) { dynamicIndexCandidate(today, index) }
+        }
+    }
+
+    private fun attemptEntry(
+        index: IndexUnderlying,
+        today: LocalDate,
+        openUnderlyings: Set<IndexUnderlying>,
+        candidateProvider: () -> Candidate?,
+    ) {
+        if (index in openUnderlyings) return
+        if (tradedOn[index] == today || fillStore.hasFillOn(today, index)) {
+            log.info("F&O paper automation will not open another {} position today", index)
+            return
+        }
+        val candidate = candidateProvider() ?: return
 
         val quote = runCatching { quoteLookup.latest("NFO:${candidate.contract.tradingSymbol}") }.getOrElse { error ->
             candidate.decisionRecord?.let { decision ->
@@ -118,17 +155,17 @@ class FnoPaperAutomationService(
             log.warn("F&O paper automation skipped: unable to get a quote for {} ({})", candidate.contract.tradingSymbol, error.message)
             return
         }
-        if (quote.lastPrice > maximumOptionPremium) {
+        if (quote.lastPrice > candidate.maximumOptionPremium) {
             candidate.decisionRecord?.let { decision ->
                 decisionJournal.save(
                     decision.copy(
                         evaluatedAt = clock.instant(),
                         executionStatus = StrategyExecutionStatus.PREMIUM_REJECTED,
-                        reason = "${decision.reason}; premium ${quote.lastPrice} exceeded cap $maximumOptionPremium",
+                        reason = "${decision.reason}; premium ${quote.lastPrice} exceeded cap ${candidate.maximumOptionPremium}",
                     ),
                 )
             }
-            log.info("F&O paper automation skipped {}: premium {} exceeds configured cap {}", candidate.contract.tradingSymbol, quote.lastPrice, maximumOptionPremium)
+            log.info("F&O paper automation skipped {}: premium {} exceeds configured cap {}", candidate.contract.tradingSymbol, quote.lastPrice, candidate.maximumOptionPremium)
             return
         }
         if (candidate.minimumPremium != null && quote.lastPrice < candidate.minimumPremium) return
@@ -138,7 +175,7 @@ class FnoPaperAutomationService(
             today,
         )
         if (result is OptionPaperOrderResult.Filled) {
-            tradedOn = today
+            tradedOn[index] = today
             updateDecision(candidate, StrategyExecutionStatus.PAPER_ORDER_FILLED, "paper BUY filled at ${quote.lastPrice}")
             log.info("Created F&O paper BUY for {} at {}; reason={}", candidate.contract.tradingSymbol, quote.lastPrice, candidate.reason)
         } else if (result is OptionPaperOrderResult.Rejected) {
@@ -149,6 +186,7 @@ class FnoPaperAutomationService(
 
     private fun manageOpenPosition(
         tradingSymbol: String,
+        underlying: IndexUnderlying,
         averagePremium: BigDecimal,
         today: LocalDate,
         forceExit: Boolean,
@@ -157,12 +195,13 @@ class FnoPaperAutomationService(
             log.warn("F&O paper automation skipped: unable to get a quote for {} ({})", tradingSymbol, error.message)
             return
         }
-        val stop = averagePremium.multiply(BigDecimal.ONE.subtract(stopLossPercent.movePointLeft(2)))
-        val target = averagePremium.multiply(BigDecimal.ONE.add(targetPercent.movePointLeft(2)))
+        val settings = settingsFor(underlying)
+        val stop = averagePremium.multiply(BigDecimal.ONE.subtract(settings.stopLossPercent.movePointLeft(2)))
+        val target = averagePremium.multiply(BigDecimal.ONE.add(settings.targetPercent.movePointLeft(2)))
         if (forceExit || quote.lastPrice <= stop || quote.lastPrice >= target) {
             val result = closeOptionPaperPosition.execute(tradingSymbol, quote.lastPrice)
             if (result is OptionPaperOrderResult.Filled) {
-                tradedOn = today
+                tradedOn[underlying] = today
                 val exit = when {
                     forceExit -> "3:25 PM forced exit"
                     quote.lastPrice <= stop -> "stop-loss"
@@ -181,24 +220,22 @@ class FnoPaperAutomationService(
         return Candidate(
             OptionContract(underlying, LocalDate.parse(expiry), strike, optionType, lotSize, tradingSymbol),
             entryPremium,
+            defaultMaximumOptionPremium,
             "fixed contract configured in .env",
             null,
         )
     }
 
-    private fun dynamicNiftyCandidate(today: LocalDate): Candidate? {
-        if (lots != 1) {
-            log.warn("DYNAMIC_NIFTY_TREND only permits one lot; configured lots={} so no action taken", lots)
-            return null
-        }
-        val underlyingQuote = runCatching { quoteLookup.latest("NSE:NIFTY 50") }.getOrElse { error ->
-            log.warn("Cannot choose a NIFTY paper contract: underlying quote unavailable ({})", error.message)
+    private fun dynamicIndexCandidate(today: LocalDate, index: IndexUnderlying): Candidate? {
+        val settings = settingsFor(index)
+        val underlyingQuote = runCatching { quoteLookup.latest(settings.marketSymbol) }.getOrElse { error ->
+            log.warn("Cannot choose a {} paper contract: underlying quote unavailable ({})", index, error.message)
             return null
         }
         val candles = runCatching {
             historicalData.load(
                 KiteHistoricalDataRequest(
-                    symbol = "NSE:NIFTY 50",
+                    symbol = settings.marketSymbol,
                     instrumentToken = underlyingQuote.instrumentToken,
                     interval = KiteCandleInterval.FIVE_MINUTE,
                     from = clock.instant().minusSeconds(5L * 24 * 60 * 60),
@@ -206,25 +243,25 @@ class FnoPaperAutomationService(
                 ),
             )
         }.getOrElse { error ->
-            log.warn("Cannot choose a NIFTY paper contract: 5-minute candles unavailable ({})", error.message)
+            log.warn("Cannot choose a {} paper contract: 5-minute candles unavailable ({})", index, error.message)
             return null
         }
         val completedCandles = candles
             .filter { it.closedAt <= clock.instant().minusSeconds(fiveMinutesInSeconds) }
             .sortedBy { it.closedAt }
         if (completedCandles.isEmpty()) {
-            log.info("NIFTY intraday strategy has no completed 5-minute candles yet")
+            log.info("{} intraday strategy has no completed 5-minute candles yet", index)
             return null
         }
         val latestCandleDate = completedCandles.last().closedAt.atZone(indiaZone).toLocalDate()
         if (latestCandleDate != today) {
-            log.info("NIFTY intraday strategy is waiting for today's first completed 5-minute candle")
+            log.info("{} intraday strategy is waiting for today's first completed 5-minute candle", index)
             return null
         }
         val decision = intradayStrategy.evaluate(completedCandles)
         val baseRecord = StrategyDecisionRecord(
             strategyName = strategyName,
-            symbol = niftySymbol,
+            symbol = settings.marketSymbol,
             candleClosedAt = completedCandles.last().closedAt,
             evaluatedAt = clock.instant(),
             direction = decision.direction,
@@ -240,7 +277,7 @@ class FnoPaperAutomationService(
             IntradayDirection.BEARISH -> OptionType.PE
             IntradayDirection.NEUTRAL -> {
                 decisionJournal.save(baseRecord)
-                log.info("NIFTY intraday signal is neutral; {}", decision.reason)
+                log.info("{} intraday signal is neutral; {}", index, decision.reason)
                 return null
             }
         }
@@ -251,18 +288,18 @@ class FnoPaperAutomationService(
                 reason = "${decision.reason}; $type signal detected",
             ),
         )
-        val expiry = optionContracts.availableExpiries(IndexUnderlying.NIFTY).firstOrNull { it >= today.plusDays(minimumDaysToExpiry) }
+        val expiry = optionContracts.availableExpiries(index).firstOrNull { it >= today.plusDays(minimumDaysToExpiry) }
             ?: run {
-                log.warn("Cannot choose a NIFTY paper contract: no expiry at least {} days away is available", minimumDaysToExpiry)
+                log.warn("Cannot choose a {} paper contract: no expiry at least {} days away is available", index, minimumDaysToExpiry)
                 return null
             }
-        val strike = optionContracts.availableStrikes(IndexUnderlying.NIFTY, expiry, type)
+        val strike = optionContracts.availableStrikes(index, expiry, type)
             .minByOrNull { it.subtract(underlyingQuote.lastPrice).abs() }
             ?: run {
-                log.warn("Cannot choose a NIFTY paper contract: no {} strikes are available for {}", type, expiry)
+                log.warn("Cannot choose a {} paper contract: no {} strikes are available for {}", index, type, expiry)
                 return null
             }
-        val contract = optionContracts.find(OptionContractQuery(IndexUnderlying.NIFTY, expiry, strike, type)).contract
+        val contract = optionContracts.find(OptionContractQuery(index, expiry, strike, type)).contract
         val reason = "${decision.reason}; selected ATM $type at strike $strike"
         val selectedRecord = baseRecord.copy(
             optionType = type,
@@ -273,7 +310,22 @@ class FnoPaperAutomationService(
             reason = reason,
         )
         decisionJournal.save(selectedRecord)
-        return Candidate(contract, null, reason, selectedRecord)
+        return Candidate(contract, null, settings.maximumOptionPremium, reason, selectedRecord)
+    }
+
+    private fun settingsFor(index: IndexUnderlying): IndexSettings = when (index) {
+        IndexUnderlying.NIFTY -> IndexSettings(
+            marketSymbol = niftySymbol,
+            maximumOptionPremium = niftyMaximumOptionPremium,
+            stopLossPercent = niftyStopLossPercent,
+            targetPercent = niftyTargetPercent,
+        )
+        IndexUnderlying.BANKNIFTY -> IndexSettings(
+            marketSymbol = bankNiftySymbol,
+            maximumOptionPremium = bankNiftyMaximumOptionPremium,
+            stopLossPercent = bankNiftyStopLossPercent,
+            targetPercent = bankNiftyTargetPercent,
+        )
     }
 
     private fun updateDecision(candidate: Candidate, status: StrategyExecutionStatus, detail: String) {
@@ -298,8 +350,16 @@ class FnoPaperAutomationService(
     private data class Candidate(
         val contract: OptionContract,
         val minimumPremium: BigDecimal?,
+        val maximumOptionPremium: BigDecimal,
         val reason: String,
         val decisionRecord: StrategyDecisionRecord?,
+    )
+
+    private data class IndexSettings(
+        val marketSymbol: String,
+        val maximumOptionPremium: BigDecimal,
+        val stopLossPercent: BigDecimal,
+        val targetPercent: BigDecimal,
     )
 
     private companion object {
@@ -312,5 +372,6 @@ class FnoPaperAutomationService(
         const val fiveMinutesInSeconds: Long = 300
         const val strategyName: String = "EMA_9_21_RSI_14"
         const val niftySymbol: String = "NSE:NIFTY 50"
+        const val bankNiftySymbol: String = "NSE:NIFTY BANK"
     }
 }

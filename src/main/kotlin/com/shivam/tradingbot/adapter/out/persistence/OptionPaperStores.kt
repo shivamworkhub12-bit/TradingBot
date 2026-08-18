@@ -56,15 +56,16 @@ class JdbcOptionPaperFillStore(private val jdbc: JdbcTemplate) : OptionPaperFill
             c.lotSize, fill.order.side.name, fill.order.lots, fill.order.expectedPremium, Timestamp.from(fill.filledAt))
     }
 
-    override fun hasFillOn(date: LocalDate): Boolean {
+    override fun hasFillOn(date: LocalDate, underlying: IndexUnderlying): Boolean {
         val zone = ZoneId.of("Asia/Kolkata")
         val from = Timestamp.from(date.atStartOfDay(zone).toInstant())
         val until = Timestamp.from(date.plusDays(1).atStartOfDay(zone).toInstant())
         return jdbc.queryForObject(
-            "SELECT EXISTS (SELECT 1 FROM fno_paper_fills WHERE filled_at >= ? AND filled_at < ?)",
+            "SELECT EXISTS (SELECT 1 FROM fno_paper_fills WHERE filled_at >= ? AND filled_at < ? AND underlying = ?)",
             Boolean::class.java,
             from,
             until,
+            underlying.name,
         ) == true
     }
 }
@@ -78,7 +79,8 @@ class InMemoryOptionPaperPortfolioStore(initial: OptionPaperPortfolio) : OptionP
 class InMemoryOptionPaperFillStore : OptionPaperFillStorePort {
     val fills = mutableListOf<OptionPaperFill>()
     override fun save(fill: OptionPaperFill) { fills += fill }
-    override fun hasFillOn(date: LocalDate): Boolean = fills.any {
-        it.filledAt.atZone(ZoneId.of("Asia/Kolkata")).toLocalDate() == date
+    override fun hasFillOn(date: LocalDate, underlying: IndexUnderlying): Boolean = fills.any {
+        it.order.contract.underlying == underlying &&
+            it.filledAt.atZone(ZoneId.of("Asia/Kolkata")).toLocalDate() == date
     }
 }

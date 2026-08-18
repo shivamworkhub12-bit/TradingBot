@@ -55,18 +55,35 @@ class JdbcStrategyDecisionJournal(private val jdbc: JdbcTemplate) :
         )
     }
 
-    override fun latest(limit: Int): List<StrategyDecisionRecord> = jdbc.query(
-        """
-        SELECT strategy_name, symbol, candle_closed_at, evaluated_at, direction,
-               fast_ema, slow_ema, rsi, underlying_price, option_type, expiry,
-               strike, trading_symbol, execution_status, reason
-        FROM fno_strategy_decisions
-        ORDER BY candle_closed_at DESC
-        LIMIT ?
-        """.trimIndent(),
-        rowMapper,
-        limit,
-    )
+    override fun latest(limit: Int, symbol: String?): List<StrategyDecisionRecord> = if (symbol == null) {
+        jdbc.query(
+            """
+            SELECT strategy_name, symbol, candle_closed_at, evaluated_at, direction,
+                   fast_ema, slow_ema, rsi, underlying_price, option_type, expiry,
+                   strike, trading_symbol, execution_status, reason
+            FROM fno_strategy_decisions
+            ORDER BY candle_closed_at DESC
+            LIMIT ?
+            """.trimIndent(),
+            rowMapper,
+            limit,
+        )
+    } else {
+        jdbc.query(
+            """
+            SELECT strategy_name, symbol, candle_closed_at, evaluated_at, direction,
+                   fast_ema, slow_ema, rsi, underlying_price, option_type, expiry,
+                   strike, trading_symbol, execution_status, reason
+            FROM fno_strategy_decisions
+            WHERE symbol = ?
+            ORDER BY candle_closed_at DESC
+            LIMIT ?
+            """.trimIndent(),
+            rowMapper,
+            symbol,
+            limit,
+        )
+    }
 
     private companion object {
         val rowMapper = RowMapper<StrategyDecisionRecord> { rs, _ ->
@@ -98,7 +115,8 @@ class InMemoryStrategyDecisionJournal : StrategyDecisionStorePort, StrategyDecis
         decisions[Triple(decision.strategyName, decision.symbol, decision.candleClosedAt)] = decision
     }
 
-    override fun latest(limit: Int): List<StrategyDecisionRecord> = decisions.values
+    override fun latest(limit: Int, symbol: String?): List<StrategyDecisionRecord> = decisions.values
+        .filter { symbol == null || it.symbol == symbol }
         .sortedByDescending { it.candleClosedAt }
         .take(limit)
 }
