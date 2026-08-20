@@ -34,8 +34,9 @@ import java.time.ZoneId
  *
  * FIXED mode trades a contract supplied in .env. Dynamic modes choose a
  * next-expiry ATM CE or PE from completed 5-minute index candles using an
- * EMA(9)/EMA(21) crossover with an RSI(14) filter. DYNAMIC_INDEX_TREND can
- * evaluate NIFTY and BANKNIFTY independently in the same paper session.
+ * EMA(9)/EMA(21) momentum with RSI(14), 20-candle breakout, and ATR(14)
+ * activity filters. DYNAMIC_INDEX_TREND can evaluate NIFTY and BANKNIFTY
+ * independently in the same paper session.
  * This is a learning rule, not a prediction or an investment recommendation.
  */
 @Component
@@ -370,7 +371,7 @@ class FnoPaperAutomationService(
         val forcedExitTime: LocalTime = LocalTime.of(15, 25)
         val marketClose: LocalTime = LocalTime.of(15, 30)
         const val fiveMinutesInSeconds: Long = 300
-        const val strategyName: String = "EMA_9_21_RSI_14"
+        const val strategyName: String = "EMA_RSI_BREAKOUT_ATR_V2"
         const val niftySymbol: String = "NSE:NIFTY 50"
         const val bankNiftySymbol: String = "NSE:NIFTY BANK"
     }

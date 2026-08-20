@@ -60,6 +60,29 @@ class EmaRsiIntradayStrategyTest {
         assertEquals(IntradayDirection.BULLISH, decision.direction)
     }
 
+    @Test
+    fun `rejects momentum without a fresh price breakout`() {
+        val strategy = EmaRsiIntradayStrategy(bullishRsiRange = BigDecimal.ZERO..BigDecimal("100"))
+
+        val decision = strategy.evaluate(candles(List(23) { 100 } + listOf(110, 109)))
+
+        assertEquals(IntradayDirection.NEUTRAL, decision.direction)
+        assertTrue(decision.reason.contains("breakout=NONE"))
+    }
+
+    @Test
+    fun `rejects a breakout when the ATR activity threshold is not met`() {
+        val strategy = EmaRsiIntradayStrategy(
+            bullishRsiRange = BigDecimal.ZERO..BigDecimal("100"),
+            minimumAtrBasisPoints = BigDecimal("1000"),
+        )
+
+        val decision = strategy.evaluate(candles(List(23) { 100 } + 110))
+
+        assertEquals(IntradayDirection.NEUTRAL, decision.direction)
+        assertTrue(decision.reason.contains("ATR(14)="))
+    }
+
     private fun candles(closes: List<Int>): List<Candle> = closes.map { BigDecimal(it) }.let(::decimalCandles)
 
     private fun decimalCandles(closes: List<BigDecimal>): List<Candle> = closes.mapIndexed { index, price ->

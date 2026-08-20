@@ -17,7 +17,9 @@ data class IntradayStrategyDecision(
 
 /**
  * Pure intraday direction rule. It evaluates completed candles only; deciding
- * which candles are complete belongs to the application layer.
+ * which candles are complete belongs to the application layer. A trade needs
+ * momentum, a fresh price breakout, and enough realized range to avoid taking
+ * tiny crossovers in an inactive market.
  */
 class EmaRsiIntradayStrategy(
     private val fastPeriod: Int = 9,
@@ -27,6 +29,9 @@ class EmaRsiIntradayStrategy(
     private val bearishRsiRange: ClosedRange<BigDecimal> = BigDecimal("30")..BigDecimal("60"),
     private val confirmationCandles: Int = 3,
     private val minimumEmaSeparationBasisPoints: BigDecimal = BigDecimal.ONE,
+    private val breakoutPeriod: Int = 20,
+    private val atrPeriod: Int = 14,
+    private val minimumAtrBasisPoints: BigDecimal = BigDecimal("2"),
 ) {
     init {
         require(fastPeriod > 0) { "fastPeriod must be positive" }
@@ -36,10 +41,14 @@ class EmaRsiIntradayStrategy(
         require(minimumEmaSeparationBasisPoints >= BigDecimal.ZERO) {
             "minimumEmaSeparationBasisPoints must not be negative"
         }
+        require(breakoutPeriod > 0) { "breakoutPeriod must be positive" }
+        require(atrPeriod > 0) { "atrPeriod must be positive" }
+        require(minimumAtrBasisPoints >= BigDecimal.ZERO) { "minimumAtrBasisPoints must not be negative" }
     }
 
     fun evaluate(candles: List<Candle>): IntradayStrategyDecision {
-        if (candles.size < slowPeriod + 2) return neutral("Not enough completed candles")
+        val requiredCandles = maxOf(slowPeriod + 2, rsiPeriod + 1, breakoutPeriod + 1, atrPeriod + 1)
+        if (candles.size < requiredCandles) return neutral("Not enough completed candles")
         require(candles.map { it.symbol }.distinct().size == 1) { "all candles must use one symbol" }
         require(candles.zipWithNext().all { (left, right) -> left.closedAt < right.closedAt }) {
             "candles must be ordered oldest to newest"
@@ -61,22 +70,41 @@ class EmaRsiIntradayStrategy(
         val separationBasisPoints = currentFast.subtract(currentSlow).abs()
             .divide(closes.last(), mathContext)
             .multiply(basisPoints, mathContext)
+        val breakoutWindow = candles.dropLast(1).takeLast(breakoutPeriod)
+        val previousHigh = breakoutWindow.maxOf { it.high }
+        val previousLow = breakoutWindow.minOf { it.low }
+        val bullishBreakout = candles.last().close > previousHigh
+        val bearishBreakout = candles.last().close < previousLow
+        val atrBasisPoints = averageTrueRange(candles.takeLast(atrPeriod + 1))
+            .divide(closes.last(), mathContext)
+            .multiply(basisPoints, mathContext)
+        val activeVolatilityRegime = atrBasisPoints >= minimumAtrBasisPoints
 
         val direction = when {
             bullishCrossedRecently &&
                 currentFast > currentSlow &&
                 separationBasisPoints >= minimumEmaSeparationBasisPoints &&
+                bullishBreakout &&
+                activeVolatilityRegime &&
                 currentRsi in bullishRsiRange ->
                 IntradayDirection.BULLISH
             bearishCrossedRecently &&
                 currentFast < currentSlow &&
                 separationBasisPoints >= minimumEmaSeparationBasisPoints &&
+                bearishBreakout &&
+                activeVolatilityRegime &&
                 currentRsi in bearishRsiRange ->
                 IntradayDirection.BEARISH
             else -> IntradayDirection.NEUTRAL
         }
+        val breakout = when {
+            bullishBreakout -> "ABOVE_${breakoutPeriod}_HIGH"
+            bearishBreakout -> "BELOW_${breakoutPeriod}_LOW"
+            else -> "NONE"
+        }
         val reason = "EMA($fastPeriod)=${currentFast.display()}, EMA($slowPeriod)=${currentSlow.display()}, " +
-            "separation=${separationBasisPoints.display(4)} bps, RSI($rsiPeriod)=${currentRsi.display()}"
+            "separation=${separationBasisPoints.display(4)} bps, RSI($rsiPeriod)=${currentRsi.display()}, " +
+            "breakout=$breakout, ATR($atrPeriod)=${atrBasisPoints.display(4)} bps"
         return IntradayStrategyDecision(direction, currentFast, currentSlow, currentRsi, reason)
     }
 
@@ -97,6 +125,17 @@ class EmaRsiIntradayStrategy(
         return BigDecimal("100").subtract(
             BigDecimal("100").divide(BigDecimal.ONE.add(relativeStrength), mathContext),
         )
+    }
+
+    private fun averageTrueRange(candles: List<Candle>): BigDecimal {
+        val trueRanges = candles.zipWithNext { previous, current ->
+            maxOf(
+                current.high.subtract(current.low),
+                current.high.subtract(previous.close).abs(),
+                current.low.subtract(previous.close).abs(),
+            )
+        }
+        return trueRanges.reduce(BigDecimal::add).divide(BigDecimal(trueRanges.size), mathContext)
     }
 
     private fun neutral(reason: String) = IntradayStrategyDecision(

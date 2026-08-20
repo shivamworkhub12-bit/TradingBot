@@ -32,8 +32,10 @@ import com.shivam.tradingbot.application.port.out.OptionPaperPortfolioStorePort
 import com.shivam.tradingbot.application.usecase.PlaceOptionPaperOrderUseCase
 import com.shivam.tradingbot.application.usecase.GetOptionPaperPortfolioMtmUseCase
 import com.shivam.tradingbot.application.usecase.CloseOptionPaperPositionUseCase
+import org.springframework.beans.factory.annotation.Value
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
+import java.math.BigDecimal
 
 /** The outermost layer chooses concrete implementations for the application. */
 @Configuration
@@ -45,7 +47,15 @@ class TradingConfiguration {
     fun strategy(): TradingStrategy = MovingAverageCrossoverStrategy(shortWindow = 3, longWindow = 10)
 
     @Bean
-    fun emaRsiIntradayStrategy() = EmaRsiIntradayStrategy()
+    fun emaRsiIntradayStrategy(
+        @Value("\${FNO_PAPER_AUTOMATION_BREAKOUT_PERIOD:20}") breakoutPeriod: Int,
+        @Value("\${FNO_PAPER_AUTOMATION_ATR_PERIOD:14}") atrPeriod: Int,
+        @Value("\${FNO_PAPER_AUTOMATION_MIN_ATR_BPS:2}") minimumAtrBasisPoints: BigDecimal,
+    ) = EmaRsiIntradayStrategy(
+        breakoutPeriod = breakoutPeriod,
+        atrPeriod = atrPeriod,
+        minimumAtrBasisPoints = minimumAtrBasisPoints,
+    )
 
     @Bean
     fun riskManager(): RiskManager = FixedLimitRiskManager(
