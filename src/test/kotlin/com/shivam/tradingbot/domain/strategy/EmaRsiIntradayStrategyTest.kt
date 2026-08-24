@@ -71,6 +71,20 @@ class EmaRsiIntradayStrategyTest {
     }
 
     @Test
+    fun `records each decision gate for paper tuning`() {
+        val strategy = EmaRsiIntradayStrategy(bullishRsiRange = BigDecimal.ZERO..BigDecimal("100"))
+
+        val decision = strategy.evaluate(candles(List(23) { 100 } + 110))
+
+        assertTrue(decision.reason.contains("trend=BULLISH"))
+        assertTrue(decision.reason.contains("crossover=RECENT_BULLISH"))
+        assertTrue(decision.reason.contains("separation="))
+        assertTrue(decision.reason.contains("RSI(14)=100.00(PASS)"))
+        assertTrue(decision.reason.contains("breakout=ABOVE_20_HIGH"))
+        assertTrue(decision.reason.contains("ATR(14)="))
+    }
+
+    @Test
     fun `rejects a breakout when the ATR activity threshold is not met`() {
         val strategy = EmaRsiIntradayStrategy(
             bullishRsiRange = BigDecimal.ZERO..BigDecimal("100"),

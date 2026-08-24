@@ -48,10 +48,14 @@ class TradingConfiguration {
 
     @Bean
     fun emaRsiIntradayStrategy(
+        @Value("\${FNO_PAPER_AUTOMATION_CONFIRMATION_CANDLES:3}") confirmationCandles: Int,
+        @Value("\${FNO_PAPER_AUTOMATION_MIN_EMA_SEPARATION_BPS:1}") minimumEmaSeparationBasisPoints: BigDecimal,
         @Value("\${FNO_PAPER_AUTOMATION_BREAKOUT_PERIOD:20}") breakoutPeriod: Int,
         @Value("\${FNO_PAPER_AUTOMATION_ATR_PERIOD:14}") atrPeriod: Int,
         @Value("\${FNO_PAPER_AUTOMATION_MIN_ATR_BPS:2}") minimumAtrBasisPoints: BigDecimal,
     ) = EmaRsiIntradayStrategy(
+        confirmationCandles = confirmationCandles,
+        minimumEmaSeparationBasisPoints = minimumEmaSeparationBasisPoints,
         breakoutPeriod = breakoutPeriod,
         atrPeriod = atrPeriod,
         minimumAtrBasisPoints = minimumAtrBasisPoints,

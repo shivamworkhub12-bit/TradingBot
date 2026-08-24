@@ -79,6 +79,21 @@ class EmaRsiIntradayStrategy(
             .divide(closes.last(), mathContext)
             .multiply(basisPoints, mathContext)
         val activeVolatilityRegime = atrBasisPoints >= minimumAtrBasisPoints
+        val trend = when {
+            currentFast > currentSlow -> IntradayDirection.BULLISH
+            currentFast < currentSlow -> IntradayDirection.BEARISH
+            else -> IntradayDirection.NEUTRAL
+        }
+        val crossover = when {
+            bullishCrossedRecently -> "RECENT_BULLISH"
+            bearishCrossedRecently -> "RECENT_BEARISH"
+            else -> "NONE"
+        }
+        val rsiAllowed = when (trend) {
+            IntradayDirection.BULLISH -> currentRsi in bullishRsiRange
+            IntradayDirection.BEARISH -> currentRsi in bearishRsiRange
+            IntradayDirection.NEUTRAL -> false
+        }
 
         val direction = when {
             bullishCrossedRecently &&
@@ -103,8 +118,10 @@ class EmaRsiIntradayStrategy(
             else -> "NONE"
         }
         val reason = "EMA($fastPeriod)=${currentFast.display()}, EMA($slowPeriod)=${currentSlow.display()}, " +
-            "separation=${separationBasisPoints.display(4)} bps, RSI($rsiPeriod)=${currentRsi.display()}, " +
-            "breakout=$breakout, ATR($atrPeriod)=${atrBasisPoints.display(4)} bps"
+            "trend=$trend, crossover=$crossover, " +
+            "separation=${separationBasisPoints.display(4)} bps(${gate(separationBasisPoints >= minimumEmaSeparationBasisPoints)}), " +
+            "RSI($rsiPeriod)=${currentRsi.display()}(${gate(rsiAllowed)}), breakout=$breakout, " +
+            "ATR($atrPeriod)=${atrBasisPoints.display(4)} bps(${gate(activeVolatilityRegime)})"
         return IntradayStrategyDecision(direction, currentFast, currentSlow, currentRsi, reason)
     }
 
@@ -147,6 +164,8 @@ class EmaRsiIntradayStrategy(
     )
 
     private fun BigDecimal.display(scale: Int = 2): BigDecimal = setScale(scale, RoundingMode.HALF_UP)
+
+    private fun gate(passed: Boolean): String = if (passed) "PASS" else "FAIL"
 
     private companion object {
         val mathContext = MathContext(12, RoundingMode.HALF_UP)
