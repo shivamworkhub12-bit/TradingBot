@@ -27,7 +27,7 @@ class EmaRsiIntradayStrategy(
     private val rsiPeriod: Int = 14,
     private val bullishRsiRange: ClosedRange<BigDecimal> = BigDecimal("40")..BigDecimal("70"),
     private val bearishRsiRange: ClosedRange<BigDecimal> = BigDecimal("30")..BigDecimal("60"),
-    private val confirmationCandles: Int = 3,
+    private val confirmationCandles: Int = 8,
     private val minimumEmaSeparationBasisPoints: BigDecimal = BigDecimal.ONE,
     private val breakoutPeriod: Int = 20,
     private val atrPeriod: Int = 14,

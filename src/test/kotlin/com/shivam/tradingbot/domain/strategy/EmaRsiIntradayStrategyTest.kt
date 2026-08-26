@@ -61,6 +61,33 @@ class EmaRsiIntradayStrategyTest {
     }
 
     @Test
+    fun `allows a breakout up to eight candles after its confirming crossover`() {
+        val strategy = EmaRsiIntradayStrategy(
+            bullishRsiRange = BigDecimal.ZERO..BigDecimal("100"),
+            confirmationCandles = 8,
+        )
+
+        val decision = strategy.evaluate(candles(List(23) { 100 } + List(6) { 110 } + 112))
+
+        assertEquals(IntradayDirection.BULLISH, decision.direction)
+        assertTrue(decision.reason.contains("crossover=RECENT_BULLISH"))
+    }
+
+    @Test
+    fun `rejects a breakout after the eight candle confirmation window expires`() {
+        val strategy = EmaRsiIntradayStrategy(
+            bullishRsiRange = BigDecimal.ZERO..BigDecimal("100"),
+            confirmationCandles = 8,
+        )
+
+        val decision = strategy.evaluate(candles(List(23) { 100 } + List(9) { 110 } + 112))
+
+        assertEquals(IntradayDirection.NEUTRAL, decision.direction)
+        assertTrue(decision.reason.contains("crossover=NONE"))
+        assertTrue(decision.reason.contains("breakout=ABOVE_20_HIGH"))
+    }
+
+    @Test
     fun `rejects momentum without a fresh price breakout`() {
         val strategy = EmaRsiIntradayStrategy(bullishRsiRange = BigDecimal.ZERO..BigDecimal("100"))
 

@@ -371,7 +371,7 @@ class FnoPaperAutomationService(
         val forcedExitTime: LocalTime = LocalTime.of(15, 25)
         val marketClose: LocalTime = LocalTime.of(15, 30)
         const val fiveMinutesInSeconds: Long = 300
-        const val strategyName: String = "EMA_RSI_BREAKOUT_ATR_V2"
+        const val strategyName: String = "EMA_RSI_BREAKOUT_ATR_V3"
         const val niftySymbol: String = "NSE:NIFTY 50"
         const val bankNiftySymbol: String = "NSE:NIFTY BANK"
     }
